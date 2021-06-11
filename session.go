@@ -22,6 +22,7 @@ const (
 	errPartialResponse                    = "failed to proceed after only receiving partial response from sign-in API: at least %q is missing from %q"
 	errFailedToParseResetURL              = "failed to parse password reset url"
 	errFailedToResetPassword              = "unexpected response to password reset: %q"
+	errFailedToParseRefererForOIDCState   = "failed to extract OIDC state from referer"
 )
 
 const (
@@ -29,10 +30,17 @@ const (
 	pathResetPassword = "resetpassword"
 )
 
+type oidcState struct {
+	clientID            string
+	codeChallengeMethod string
+	codeChallenge       string
+	redirectURL         string
+}
+
 // Session identifies a password reset request / response session
 type Session struct {
 	client    *http.Client
-	csrfToken func(string) (string, error)
+	oidcState *oidcState
 }
 
 type params map[string]string
@@ -58,29 +66,17 @@ func New() (*Session, error) {
 		},
 	}
 
-	// the csrf token and a session id (that is used by sign in via the console
-	// but can be omitted) are both also availble in the document body as the
-	// meta tags with names of csrf_token and session_id respectivly.
+	return session, nil
 
-	session.csrfToken = func(path string) (string, error) {
+}
 
-		for _, cookie := range cookies.Cookies(&url.URL{
-			Scheme: "https",
-			Host:   "signin.aws.amazon.com",
-			Path:   fmt.Sprintf("/%s", path),
-		}) {
 
-			if cookie.Name == "aws-signin-csrf" {
-				return cookie.Value, nil
-			}
 
 		}
 
-		return "", fmt.Errorf(errFailedToExtractCSRFTokenFromCookie)
 
 	}
 
-	return session, nil
 
 }
 
@@ -98,6 +94,9 @@ func (s *Session) ResetResponse(resetURL, newPassword string) error {
 		key   = parsed.Query().Get("key")
 		token = parsed.Query().Get("token")
 	)
+
+	// rebuild URL from scratch to avoid surprises
+	resetURL = fmt.Sprintf("https://signin.aws.amazon.com/resetpassword?key=%s&token=%s", key, token)
 
 	_, err = s.client.Get(resetURL)
 
@@ -193,13 +192,53 @@ func (s *Session) captcha(initial *response, params params, solver CaptchaSolver
 }
 
 func (s *Session) doLoginWithEmail(email string, solver CaptchaSolver) error {
+func (s *Session) extractCSRFToken(path string) (string, error) {
+
+	// the csrf token and a session id (that is used by sign in via the console
+	// but can be omitted) are both also availble in the document body as the
+	// meta tags with names of csrf_token and session_id respectivly.
+
+	for _, cookie := range s.client.Jar.Cookies(&url.URL{
+		Scheme: "https",
+		Host:   "signin.aws.amazon.com",
+		Path:   fmt.Sprintf("/%s", path),
+	}) {
+
+		if cookie.Name == "aws-signin-csrf" {
+			return cookie.Value, nil
+		}
+
+	}
+
+	return "", fmt.Errorf(errFailedToExtractCSRFTokenFromCookie)
+
+}
+
+func (s *Session) doLoginWithEmail(email string, solver CaptchaSolver) (*response, error) {
 
 	// implicitly this redirects to /oauth and /signin
 
-	_, err := s.client.Get(`https://console.aws.amazon.com/console/home?hashArgs=%23a`)
+	r, err := s.client.Get(`https://console.aws.amazon.com/console/home?hashArgs=%23a`)
 
 	if err != nil {
-		return errors.Wrapf(err, errFailedToStartSignInSequence)
+		return nil, errors.Wrapf(err, errFailedToStartSignInSequence)
+	}
+
+	// extract OIDC state from implicit redirects and store it for usage in the actual login
+
+	referer, err := url.Parse(r.Request.Referer())
+
+	if err != nil {
+		return nil, errors.Wrapf(err, errFailedToParseRefererForOIDCState)
+	}
+
+	query := referer.Query()
+
+	s.oidcState = &oidcState{
+		clientID:            query.Get("client_id"),
+		codeChallenge:       query.Get("code_challenge"),
+		codeChallengeMethod: query.Get("code_challenge_method"),
+		redirectURL:         query.Get("redirect_uri"),
 	}
 
 	p := params{
@@ -210,7 +249,7 @@ func (s *Session) doLoginWithEmail(email string, solver CaptchaSolver) error {
 	res, err := s.request(pathSignIn, p)
 
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	return s.captcha(res, p, solver)
@@ -239,7 +278,7 @@ func (s *Session) request(path string, params map[string]string) (*response, err
 
 	var response response
 
-	csrf, err := s.csrfToken(path)
+	csrf, err := s.extractCSRFToken(path)
 
 	if err != nil {
 		return nil, err
