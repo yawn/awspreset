@@ -63,7 +63,7 @@ func New() (*Session, error) {
 	session := &Session{
 		client: &http.Client{
 			Jar:     cookies,
-			Timeout: time.Second * 5,
+			Timeout: time.Second * 10,
 		},
 	}
 
