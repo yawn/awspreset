@@ -16,13 +16,14 @@ const (
 	errFailedToCreateCookieJar            = "failed to create cookie jar"
 	errFailedToExecuteCaptchaSolver       = "failed to execute captcha solver"
 	errFailedToExtractCSRFTokenFromCookie = "failed to extract CSFR token from cookie"
+	errFailedToLoginWithPassword          = "failed to login with password"
+	errFailedToParseRefererForOIDCState   = "failed to extract OIDC state from referer"
+	errFailedToParseResetURL              = "failed to parse password reset url"
 	errFailedToParseResponse              = "failed to parse response from sign-in API"
+	errFailedToResetPassword              = "unexpected response to password reset: %q"
 	errFailedToStartResetSequence         = "failed to initiate reset sequence"
 	errFailedToStartSignInSequence        = "failed to initiate sign-in sequence"
 	errPartialResponse                    = "failed to proceed after only receiving partial response from sign-in API: at least %q is missing from %q"
-	errFailedToParseResetURL              = "failed to parse password reset url"
-	errFailedToResetPassword              = "unexpected response to password reset: %q"
-	errFailedToParseRefererForOIDCState   = "failed to extract OIDC state from referer"
 )
 
 const (
@@ -70,13 +71,21 @@ func New() (*Session, error) {
 
 }
 
+func (s *Session) Login(email, password string, solver CaptchaSolver, otp func() string) error {
 
+	res, err := s.doLoginWithEmail(email, solver)
 
-		}
-
-
+	if err != nil {
+		return err
 	}
 
+	captchaStatusToken := res.Properties["captchaStatusToken"].(string)
+
+	if err := s.doLoginWithPassword(email, password, captchaStatusToken, otp); err != nil {
+		return err
+	}
+
+	return nil
 
 }
 
@@ -129,7 +138,7 @@ func (s *Session) ResetResponse(resetURL, newPassword string) error {
 // request of the password reset url.
 func (s *Session) ResetRequest(email string, solver CaptchaSolver) error {
 
-	if err := s.doLoginWithEmail(email, solver); err != nil {
+	if _, err := s.doLoginWithEmail(email, solver); err != nil {
 		return err
 	}
 
@@ -141,7 +150,7 @@ func (s *Session) ResetRequest(email string, solver CaptchaSolver) error {
 
 }
 
-func (s *Session) captcha(initial *response, params params, solver CaptchaSolver) error {
+func (s *Session) captcha(initial *response, params params, solver CaptchaSolver) (*response, error) {
 
 	var response = initial
 
@@ -154,7 +163,7 @@ func (s *Session) captcha(initial *response, params params, solver CaptchaSolver
 		} {
 
 			if _, ok := response.Properties[e]; !ok {
-				return fmt.Errorf(errPartialResponse, e, response)
+				return nil, fmt.Errorf(errPartialResponse, e, response)
 			}
 
 		}
@@ -168,7 +177,7 @@ func (s *Session) captcha(initial *response, params params, solver CaptchaSolver
 		guess, err := solver(i, captchaURL)
 
 		if err != nil {
-			return errors.Wrapf(err, errFailedToExecuteCaptchaSolver)
+			return nil, errors.Wrapf(err, errFailedToExecuteCaptchaSolver)
 		}
 
 		params["captcha_guess"] = guess
@@ -178,20 +187,19 @@ func (s *Session) captcha(initial *response, params params, solver CaptchaSolver
 		response, err = s.request(pathSignIn, params)
 
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if response.State == "SUCCESS" {
-			break
+			return response, nil
 		}
 
 	}
 
-	return nil
+	panic("should not be reached")
 
 }
 
-func (s *Session) doLoginWithEmail(email string, solver CaptchaSolver) error {
 func (s *Session) extractCSRFToken(path string) (string, error) {
 
 	// the csrf token and a session id (that is used by sign in via the console
@@ -256,6 +264,45 @@ func (s *Session) doLoginWithEmail(email string, solver CaptchaSolver) (*respons
 
 }
 
+func (s *Session) doLoginWithPassword(email, password, captchaStatusToken string, otp func() string) error {
+
+	logger("> log in with password %x (otp %v)", password, otp)
+
+	p := params{
+		"action":                "authenticateRoot",
+		"captcha_status_token":  captchaStatusToken,
+		"client_id":             s.oidcState.clientID,
+		"code_challenge_method": s.oidcState.codeChallengeMethod,
+		"code_challenge":        s.oidcState.codeChallenge,
+		"email":                 email,
+		"mfaSerial":             "undefined",
+		"password":              password,
+		"redirect_uri":          s.oidcState.redirectURL,
+	}
+
+	// if no OTP is passed but required, the authentication will fail with a message "Your authentication information is incorrect. Please try again." - there is an MFA API available that will return the information that an MFA is registered / the type of the MFA but this is currently not implemented here
+
+	if otp != nil {
+		p["mfaType"] = "SW"
+		p["mfa1"] = otp()
+	}
+
+	res, err := s.request(pathSignIn, p)
+
+	if err != nil {
+		return err
+	}
+
+	if res.State == "SUCCESS" {
+		logger("< success %v", res)
+		return nil
+	}
+
+	logger("< error %v", res)
+
+	return fmt.Errorf(errFailedToLoginWithPassword)
+
+}
 func (s *Session) doResetPassword(email string, solver CaptchaSolver) error {
 
 	res, err := s.request(pathSignIn, params{
@@ -267,11 +314,12 @@ func (s *Session) doResetPassword(email string, solver CaptchaSolver) error {
 		return err
 	}
 
-	return s.captcha(res, params{
+	_, err = s.captcha(res, params{
 		"action": "getResetPasswordToken",
 		"email":  email,
 	}, solver)
 
+	return err
 }
 
 func (s *Session) request(path string, params map[string]string) (*response, error) {
