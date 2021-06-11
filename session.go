@@ -224,6 +224,8 @@ func (s *Session) extractCSRFToken(path string) (string, error) {
 
 func (s *Session) doLoginWithEmail(email string, solver CaptchaSolver) (*response, error) {
 
+	logger("> log in with email %q", email)
+
 	// implicitly this redirects to /oauth and /signin
 
 	r, err := s.client.Get(`https://console.aws.amazon.com/console/home?hashArgs=%23a`)
