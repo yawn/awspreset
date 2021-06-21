@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	errFailedRequest                      = "failed request to sign-in API"
+	errFailedRequest                      = "failed request to API"
 	errFailedToCreateCookieJar            = "failed to create cookie jar"
 	errFailedToExecuteCaptchaSolver       = "failed to execute captcha solver"
 	errFailedToExtractCSRFTokenFromCookie = "failed to extract CSFR token from cookie"

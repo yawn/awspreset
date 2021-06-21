@@ -41,3 +41,75 @@ if err := session.ResetResponse(
   panic(err)
 }
 ```
+
+## Enable MFA
+
+Now login with new the new password and enable a [virtual MFA device](https://aws.amazon.com/iam/features/mfa/).
+
+```
+session, err := awspreset.New()
+
+if err != nil {
+  panic(err)
+}
+
+err = session.Login(
+  "root@example.com",
+  "Th1s-Is-My-New-Password!",
+  awspreset.Terminal,
+  nil,
+)
+
+if err != nil {
+  panic(err)
+}
+
+mfa := awspreset.NewMFA(session)
+
+res, err := mfa.EnableMFA()
+
+if err != nil {
+  panic(err)
+}
+
+res, err := mfa.EnableMFA()
+
+if err != nil {
+  panic(err)
+}
+
+fmt.Printf("MFA secrets %q", res.Base32StringSeed)
+
+// start new
+
+session, err = awspreset.New()
+
+if err != nil {
+  panic(err)
+}
+
+otp := func() string {
+
+  codes, err := awspreset.TOTP(res.Base32StringSeed)
+
+  if err != nil {
+    panic(err)
+  }
+
+  log.Printf("log in with otp %s", codes[0])
+
+  return codes[0]
+
+}
+
+err = session.Login(
+  "root@example.com",
+  "Th1s-Is-My-New-Password!",
+  awspreset.Terminal,
+  otp,
+)
+
+if err != nil {
+  panic(err)
+}
+```
